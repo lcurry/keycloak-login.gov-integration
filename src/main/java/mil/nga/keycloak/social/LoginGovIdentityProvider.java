@@ -22,6 +22,14 @@ import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
 import java.security.PublicKey;
 
+import org.keycloak.models.UserSessionModel;
+import javax.ws.rs.core.UriInfo;
+import javax.ws.rs.core.Response;
+import org.keycloak.models.RealmModel;
+import org.keycloak.services.resources.IdentityBrokerService;
+import org.keycloak.services.resources.RealmsResource;
+import org.keycloak.broker.provider.util.SimpleHttp;
+
 public class LoginGovIdentityProvider
         extends OIDCIdentityProvider
         implements SocialIdentityProvider<OIDCIdentityProviderConfig> {
@@ -96,4 +104,58 @@ public class LoginGovIdentityProvider
 
         return identityContext;
     }
+
+    protected void backchannelLogout(UserSessionModel userSession, String idToken) {
+        String sessionId = userSession.getId();
+        UriBuilder logoutUri = UriBuilder.fromUri(getConfig().getLogoutUrl())
+                .queryParam("state", sessionId);
+        //if (getConfig().isSendIdTokenOnLogout() && idToken != null) {
+        //    logoutUri.queryParam("id_token_hint", idToken);
+        //}
+        //if (getConfig().isSendClientIdOnLogout()) {
+            logger.debug("backchannelLogout() - Setting client_id to " + getConfig().getClientId());
+            logoutUri.queryParam("client_id", getConfig().getClientId());
+        //}
+        String url = logoutUri.build().toString();
+        try {
+            int status = SimpleHttp.doGet(url, session).asStatus();
+            boolean success = status >= 200 && status < 400;
+            if (!success) {
+                logger.warn("Failed backchannel broker logout to: " + url);
+            }
+        } catch (Exception e) {
+            logger.warn("Failed backchannel broker logout to: " + url, e);
+        }
+    }
+
+    public Response keycloakInitiatedBrowserLogout(KeycloakSession session, UserSessionModel userSession, UriInfo uriInfo, RealmModel realm) {
+        logger.debug("Entered keycloakInitiatedBrowserLogout");
+
+        if (getConfig().getLogoutUrl() == null || getConfig().getLogoutUrl().trim().equals("")) return null;
+        String idToken = userSession.getNote(FEDERATED_ID_TOKEN);
+        if (getConfig().isBackchannelSupported()) {
+            backchannelLogout(userSession, idToken);
+            return null;
+        } else {
+            String sessionId = userSession.getId();
+            UriBuilder logoutUri = UriBuilder.fromUri(getConfig().getLogoutUrl())
+                    .queryParam("state", sessionId);
+            //if (getConfig().isSendIdTokenOnLogout() && idToken != null) {
+            //    logoutUri.queryParam("id_token_hint", idToken);
+            //}
+            //if (getConfig().isSendClientIdOnLogout()) {
+                logoutUri.queryParam("client_id", getConfig().getClientId());
+                logger.debug("keycloakInitiatedBrowserLogout() - Setting client_id to " + getConfig().getClientId());
+            //}
+            String redirect = RealmsResource.brokerUrl(uriInfo)
+                    .path(IdentityBrokerService.class, "getEndpoint")
+                    .path(OIDCEndpoint.class, "logoutResponse")
+                    .build(realm.getName(), getConfig().getAlias()).toString();
+            logger.debug("keycloakInitiatedBrowserLogout() - Setting post_logout_redirect_uri to " + redirect);
+            logoutUri.queryParam("post_logout_redirect_uri", redirect);
+            Response response = Response.status(302).location(logoutUri.build()).build();
+            return response;
+        }
+    }
+
 }
